@@ -1,12 +1,14 @@
-import type { CalendarView, PlannerEventType } from '../types';
+import type { AppMode, CalendarView, PlannerEvent, PlannerEventType } from '../types';
 
 const STORAGE_KEYS = {
+  appMode: 'yearplan:app-mode',
   selectedCalendarIds: 'yearplan:selected-calendar-ids',
   calendarFilters: 'yearplan:calendar-filters',
   typeFilters: 'yearplan:type-filters',
   view: 'yearplan:view',
   month: 'yearplan:month',
   authHint: 'yearplan:auth-hint',
+  demoEvents: 'yearplan:demo-events',
 };
 
 function readJson<T>(key: string, fallback: T): T {
@@ -68,4 +70,20 @@ export function readAuthHint(): boolean {
 
 export function writeAuthHint(value: boolean): void {
   writeJson(STORAGE_KEYS.authHint, value);
+}
+
+export function readAppMode(): AppMode | null {
+  return readJson<AppMode | null>(STORAGE_KEYS.appMode, null);
+}
+
+export function writeAppMode(mode: AppMode): void {
+  writeJson(STORAGE_KEYS.appMode, mode);
+}
+
+export function readDemoEvents(): PlannerEvent[] {
+  return readJson<PlannerEvent[]>(STORAGE_KEYS.demoEvents, []);
+}
+
+export function writeDemoEvents(events: PlannerEvent[]): void {
+  writeJson(STORAGE_KEYS.demoEvents, events);
 }

@@ -1,4 +1,5 @@
 export type CalendarView = 'year' | 'month';
+export type AppMode = 'google' | 'demo';
 
 export type PlannerEventType =
   | 'vacation'

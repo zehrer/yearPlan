@@ -60,6 +60,10 @@ function getClientId(): string {
   return clientId;
 }
 
+export function hasGoogleClientIdConfigured(): boolean {
+  return Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID);
+}
+
 function getEventTypeLabel(type: PlannerEventType): string {
   return EVENT_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? 'Travel';
 }

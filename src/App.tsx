@@ -18,24 +18,30 @@ import {
   EVENT_TYPE_OPTIONS,
   fetchCalendarList,
   fetchPlannerEvents,
+  hasGoogleClientIdConfigured,
   requestGoogleAccessToken,
   updatePlannerEvent,
 } from './lib/google';
+import { DEMO_CALENDARS, DEMO_EVENTS } from './lib/demo';
 import {
+  readAppMode,
   readAuthHint,
   readCalendarFilters,
+  readDemoEvents,
   readMonth,
   readSelectedCalendarIds,
   readTypeFilters,
   readView,
+  writeAppMode,
   writeAuthHint,
   writeCalendarFilters,
+  writeDemoEvents,
   writeMonth,
   writeSelectedCalendarIds,
   writeTypeFilters,
   writeView,
 } from './lib/storage';
-import type { CalendarView, GoogleCalendarEntry, PlannerEvent, PlannerEventDraft, PlannerEventType } from './types';
+import type { AppMode, CalendarView, GoogleCalendarEntry, PlannerEvent, PlannerEventDraft, PlannerEventType } from './types';
 
 type ModalState =
   | { mode: 'create'; draft: PlannerEventDraft }
@@ -89,7 +95,10 @@ export default function App() {
   const initialYear = getYear(initialMonth);
   const initialMonthIndex = getMonthIndex(initialMonth);
   const initialView = readView() ?? 'year';
+  const googleConfigured = hasGoogleClientIdConfigured();
+  const initialMode = readAppMode() ?? (googleConfigured ? 'google' : 'demo');
 
+  const [appMode, setAppMode] = useState<AppMode>(initialMode);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [authAttempted, setAuthAttempted] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -109,6 +118,8 @@ export default function App() {
   const [modalState, setModalState] = useState<ModalState | null>(null);
   const [savingEvent, setSavingEvent] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
+  const isDemoMode = appMode === 'demo';
+  const showSignedOutPreview = !isDemoMode && !accessToken;
 
   const selectedCalendars = useMemo(
     () => calendars.filter((calendar) => selectedCalendarIds.includes(calendar.id)),
@@ -123,6 +134,11 @@ export default function App() {
       (event) => activeCalendarIds.includes(event.calendarId) && activeTypes.includes(event.type),
     );
   }, [calendarFilters, events, selectedCalendarIds, typeFilters]);
+
+  const signedOutPreviewEvents = useMemo(
+    () => DEMO_EVENTS.filter((event) => getYear(event.startDate) <= year && getYear(event.endDate) >= year),
+    [year],
+  );
 
   const previewDrafts = useMemo(() => {
     if (!draggingState) {
@@ -224,20 +240,48 @@ export default function App() {
   }
 
   useEffect(() => {
+    writeAppMode(appMode);
+  }, [appMode]);
+
+  useEffect(() => {
+    if (isDemoMode) {
+      const demoEvents = readDemoEvents();
+      const nextEvents = demoEvents.length > 0 ? demoEvents : DEMO_EVENTS;
+
+      setAccessToken(null);
+      setCalendars(DEMO_CALENDARS);
+      setSelectedCalendarIds(DEMO_CALENDARS.map((calendar) => calendar.id));
+      setCalendarFilters(DEMO_CALENDARS.map((calendar) => calendar.id));
+      setTypeFilters(EVENT_TYPE_OPTIONS.map((option) => option.value));
+      setShowCalendarPicker(false);
+      setEvents(nextEvents);
+      writeDemoEvents(nextEvents);
+      setAuthAttempted(true);
+      setAuthError(null);
+      setAppError(null);
+    }
+  }, [isDemoMode]);
+
+  useEffect(() => {
+    if (isDemoMode || !googleConfigured) {
+      setAuthAttempted(true);
+      return;
+    }
+
     if (readAuthHint()) {
       void signIn('');
       return;
     }
     setAuthAttempted(true);
-  }, []);
+  }, [googleConfigured, isDemoMode]);
 
   useEffect(() => {
-    if (!accessToken) {
+    if (isDemoMode || !accessToken) {
       return;
     }
 
     void loadCalendars(accessToken);
-  }, [accessToken]);
+  }, [accessToken, isDemoMode]);
 
   useEffect(() => {
     writeView(view);
@@ -273,7 +317,7 @@ export default function App() {
   }, [typeFilters]);
 
   useEffect(() => {
-    if (!accessToken || selectedCalendars.length === 0) {
+    if (isDemoMode || !accessToken || selectedCalendars.length === 0) {
       return;
     }
 
@@ -281,7 +325,13 @@ export default function App() {
       setAppError(error instanceof Error ? error.message : 'Could not load planner events.');
       setLoadingEvents(false);
     });
-  }, [accessToken, selectedCalendars, year]);
+  }, [accessToken, isDemoMode, selectedCalendars, year]);
+
+  useEffect(() => {
+    if (isDemoMode) {
+      writeDemoEvents(events);
+    }
+  }, [events, isDemoMode]);
 
   function handleToggleCalendar(calendarId: string) {
     setSelectedCalendarIds((current) =>
@@ -348,7 +398,7 @@ export default function App() {
   }
 
   async function handleCommitInteraction() {
-    if (!draggingState || !accessToken) {
+    if (!draggingState) {
       setDraggingState(null);
       return;
     }
@@ -364,8 +414,12 @@ export default function App() {
     setAppError(null);
 
     try {
-      const updated = await updatePlannerEvent(accessToken, draft, calendars);
-      setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+      if (isDemoMode) {
+        setEvents((current) => current.map((event) => (event.id === draft.id ? { ...event, ...draft } : event)));
+      } else if (accessToken) {
+        const updated = await updatePlannerEvent(accessToken, draft, calendars);
+        setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+      }
     } catch (error) {
       setAppError(error instanceof Error ? error.message : 'Could not update the event.');
     } finally {
@@ -374,7 +428,7 @@ export default function App() {
   }
 
   async function handleSaveDraft(draft: PlannerEventDraft) {
-    if (!accessToken) {
+    if (!isDemoMode && !accessToken) {
       return;
     }
 
@@ -383,11 +437,47 @@ export default function App() {
 
     try {
       if (modalState?.mode === 'create') {
-        const created = await createPlannerEvent(accessToken, draft, calendars);
-        setEvents((current) => [...current, created]);
+        if (isDemoMode) {
+          const calendarSummary = calendars.find((calendar) => calendar.id === draft.calendarId)?.summary ?? 'Demo Calendar';
+          const created: PlannerEvent = {
+            id: `demo-${crypto.randomUUID()}`,
+            calendarId: draft.calendarId,
+            calendarSummary,
+            title: draft.title,
+            startDate: draft.startDate,
+            endDate: draft.endDate,
+            colorId: draft.colorId,
+            location: draft.location,
+            notes: draft.notes,
+            type: draft.type,
+            managedByYearPlan: true,
+            readOnly: false,
+          };
+          setEvents((current) => [...current, created]);
+        } else if (accessToken) {
+          const created = await createPlannerEvent(accessToken, draft, calendars);
+          setEvents((current) => [...current, created]);
+        }
       } else {
-        const updated = await updatePlannerEvent(accessToken, draft, calendars);
-        setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+        if (isDemoMode) {
+          const calendarSummary = calendars.find((calendar) => calendar.id === draft.calendarId)?.summary ?? 'Demo Calendar';
+          setEvents((current) =>
+            current.map((event) =>
+              event.id === draft.id
+                ? {
+                    ...event,
+                    ...draft,
+                    calendarSummary,
+                    managedByYearPlan: true,
+                    readOnly: false,
+                  }
+                : event,
+            ),
+          );
+        } else if (accessToken) {
+          const updated = await updatePlannerEvent(accessToken, draft, calendars);
+          setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+        }
       }
       setModalState(null);
     } catch (error) {
@@ -398,7 +488,7 @@ export default function App() {
   }
 
   async function handleAdoptEvent(event: PlannerEvent) {
-    if (!accessToken) {
+    if (isDemoMode || !accessToken) {
       return;
     }
 
@@ -421,6 +511,12 @@ export default function App() {
   }
 
   async function handleRefresh() {
+    if (isDemoMode) {
+      const storedDemoEvents = readDemoEvents();
+      setEvents(storedDemoEvents.length > 0 ? storedDemoEvents : DEMO_EVENTS);
+      return;
+    }
+
     if (!accessToken) {
       return;
     }
@@ -441,35 +537,95 @@ export default function App() {
         <section className="hero panel">
           <div className="hero-copy">
             <p className="eyebrow">Long-range planning</p>
-            <h1>See a whole year of multi-day plans without leaving the browser.</h1>
+            <h1>Plan the year in one view.</h1>
             <p className="muted">
-              YearPlan layers vacations, travel, hotel stays, flights, and holidays directly on top of Google Calendar data.
-              It is built for year-scale planning, not day-by-day scheduling.
+              Multi-day trips, vacations, hotel stays, flights, and holidays shown as overlapping bars across the year.
             </p>
           </div>
 
-          {!accessToken ? (
+          {!accessToken && !isDemoMode ? (
             <div className="auth-card">
-              <h2>Connect Google Calendar</h2>
+              <h2>{googleConfigured ? 'Connect Google Calendar' : 'Finish setup or start in demo mode'}</h2>
               <p className="muted">
-                Sign in with Google to load calendars, filter event types, and create or update YearPlan-managed planning items.
+                {googleConfigured
+                  ? 'Sign in to load your calendars and switch from preview to live planning.'
+                  : 'Google Calendar is not configured yet. Add a client id for live data, or open the planner in demo mode right now.'}
               </p>
-              <button type="button" className="button button-primary" onClick={() => void signIn('consent')}>
-                Sign in with Google
-              </button>
+              <div className="setup-actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  onClick={() => void signIn('consent')}
+                  disabled={!googleConfigured}
+                >
+                  Sign in with Google
+                </button>
+                <button
+                  type="button"
+                  className="button button-ghost"
+                  onClick={() => setAppMode('demo')}
+                >
+                  Try demo mode
+                </button>
+              </div>
+              {!googleConfigured ? (
+                <div className="setup-panel">
+                  <strong>Google setup</strong>
+                  <ol className="setup-list">
+                    <li>Create a `.env.local` file in the project root.</li>
+                    <li>Add `VITE_GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com`.</li>
+                    <li>Restart the dev server and authorize `http://127.0.0.1:5173` in Google Cloud.</li>
+                  </ol>
+                </div>
+              ) : null}
               {authAttempted && authError ? <p className="error-text">{authError}</p> : null}
             </div>
           ) : (
             <div className="status-card">
-              <strong>Connected to Google Calendar</strong>
-              <span>Browser-only OAuth. Events stay in your selected calendars.</span>
+              <strong>{isDemoMode ? 'Demo mode is active' : 'Connected to Google Calendar'}</strong>
+              <span>
+                {isDemoMode
+                  ? 'You can test year view, month view, filters, and drag editing locally without Google.'
+                  : 'Browser-only OAuth. Events stay in your selected calendars.'}
+              </span>
+              <div className="setup-actions">
+                {isDemoMode && googleConfigured ? (
+                  <button type="button" className="button button-primary" onClick={() => setAppMode('google')}>
+                    Switch to Google
+                  </button>
+                ) : null}
+                {!isDemoMode ? (
+                  <button type="button" className="button button-ghost" onClick={() => setAppMode('demo')}>
+                    Open demo mode
+                  </button>
+                ) : null}
+              </div>
             </div>
           )}
         </section>
 
         {appError ? <div className="panel error-banner">{appError}</div> : null}
 
-        {accessToken && calendars.length > 0 && (showCalendarPicker || emptySelection) ? (
+        {showSignedOutPreview ? (
+          <section className="panel preview-panel">
+            <div className="preview-header">
+              <div>
+                <p className="eyebrow">Preview</p>
+                <h2>{year} year view</h2>
+              </div>
+              <p className="muted">
+                Read-only sample data. Sign in or open demo mode for editing.
+              </p>
+            </div>
+            <YearView
+              year={year}
+              events={signedOutPreviewEvents}
+              onOpenEvent={() => undefined}
+            />
+          </section>
+        ) : null}
+
+        {(isDemoMode || accessToken) && calendars.length > 0 && (showCalendarPicker || emptySelection) ? (
           <CalendarPicker
             calendars={calendars}
             selectedCalendarIds={selectedCalendarIds}
@@ -478,7 +634,7 @@ export default function App() {
           />
         ) : null}
 
-        {accessToken && calendars.length > 0 && !emptySelection && !showCalendarPicker ? (
+        {(isDemoMode || accessToken) && calendars.length > 0 && !emptySelection && !showCalendarPicker ? (
           <>
             <PlannerToolbar
               calendars={calendars}
@@ -519,11 +675,11 @@ export default function App() {
           </>
         ) : null}
 
-        {accessToken && calendars.length === 0 && loadingCalendars ? (
+        {!isDemoMode && accessToken && calendars.length === 0 && loadingCalendars ? (
           <div className="panel centered-state">Loading calendars…</div>
         ) : null}
 
-        {accessToken && calendars.length === 0 && !loadingCalendars ? (
+        {!isDemoMode && accessToken && calendars.length === 0 && !loadingCalendars ? (
           <div className="panel centered-state">
             No writable Google Calendars were found for this account.
           </div>
