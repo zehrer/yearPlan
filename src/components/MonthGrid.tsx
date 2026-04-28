@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { buildMonthLayout } from '../lib/layout';
 import { GOOGLE_EVENT_COLORS } from '../lib/google';
-import { compareIsoDate, getDayOfWeekMonday, getMonthShortLabel, isSameMonth } from '../lib/date';
+import { compareIsoDate, getMonthLabel, getMonthShortLabel, isSameMonth } from '../lib/date';
 import type { EventSegment, PlannerEvent, PlannerEventDraft } from '../types';
 
 interface DragInteractionState {
@@ -23,6 +23,7 @@ interface MonthGridProps {
   monthIndex: number;
   events: PlannerEvent[];
   compact?: boolean;
+  variant?: 'card' | 'flat';
   interactive?: boolean;
   draggingState: DragInteractionState | null;
   selection: SelectionState | null;
@@ -35,7 +36,8 @@ interface MonthGridProps {
   getPreviewDraft?: (eventId: string) => PlannerEventDraft | null;
 }
 
-const WEEKDAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const COMPACT_WEEKDAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const FULL_WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 function eventBarStyle(event: PlannerEvent): React.CSSProperties {
   const color = GOOGLE_EVENT_COLORS[event.colorId] ?? GOOGLE_EVENT_COLORS['10'];
@@ -75,6 +77,7 @@ export function MonthGrid({
   monthIndex,
   events,
   compact = false,
+  variant = 'card',
   interactive = false,
   draggingState,
   selection,
@@ -109,21 +112,24 @@ export function MonthGrid({
   const previewEvents = events.map((event) => buildPreviewEvent(event, getPreviewDraft?.(event.id) ?? null));
   const layout = buildMonthLayout(year, monthIndex, previewEvents);
   const eventsById = new Map(previewEvents.map((event) => [event.id, event]));
-  const dayCellClassName = compact ? 'day-cell day-cell-compact' : 'day-cell';
+  const isFlat = variant === 'flat';
+  const dayCellClassName = `day-cell${compact ? ' day-cell-compact' : ''}${isFlat ? ' day-cell-flat' : ''}`;
+  const weekdayLabels = isFlat ? FULL_WEEKDAY_LABELS : COMPACT_WEEKDAY_LABELS;
+  const headerLabel = isFlat ? getMonthLabel(year, monthIndex) : getMonthShortLabel(monthIndex);
 
   return (
-    <section className={`month-card ${compact ? 'month-card-compact' : 'month-card-expanded'}`}>
+    <section className={`month-card ${compact ? 'month-card-compact' : 'month-card-expanded'} ${isFlat ? 'month-card-flat' : ''}`}>
       <header className="month-card-header">
-        <h3>{getMonthShortLabel(monthIndex)}</h3>
+        <h3>{headerLabel}</h3>
       </header>
 
-      <div className="month-weekday-row">
-        {WEEKDAY_LABELS.map((label) => (
+      <div className={`month-weekday-row ${isFlat ? 'month-weekday-row-flat' : ''}`}>
+        {weekdayLabels.map((label) => (
           <span key={label}>{label}</span>
         ))}
       </div>
 
-      <div className="month-weeks">
+      <div className={`month-weeks ${isFlat ? 'month-weeks-flat' : ''}`}>
         {layout.weeks.map((week, weekIndex) => {
           const segments = layout.segmentsByWeek[weekIndex];
           const laneCount = Math.max(layout.laneCounts[weekIndex], 1);
@@ -131,7 +137,7 @@ export function MonthGrid({
           return (
             <div
               key={week.start}
-              className="week-row"
+              className={`week-row ${isFlat ? 'week-row-flat' : ''}`}
               style={
                 {
                   '--week-lanes': laneCount,
@@ -152,7 +158,7 @@ export function MonthGrid({
                 ))}
               </div>
 
-              <div className="week-bars">
+              <div className={`week-bars ${isFlat ? 'week-bars-flat' : ''}`}>
                 {segments.map((segment) => {
                   const event = eventsById.get(segment.eventId);
                   if (!event) {
@@ -163,6 +169,7 @@ export function MonthGrid({
                     <MonthGridEventBar
                       key={segment.key}
                       compact={compact}
+                      flat={isFlat}
                       event={event}
                       segment={segment}
                       interactive={interactive && !event.readOnly}
@@ -183,6 +190,7 @@ export function MonthGrid({
 
 interface MonthGridEventBarProps {
   compact: boolean;
+  flat: boolean;
   event: PlannerEvent;
   segment: EventSegment;
   interactive: boolean;
@@ -193,6 +201,7 @@ interface MonthGridEventBarProps {
 
 function MonthGridEventBar({
   compact,
+  flat,
   event,
   segment,
   interactive,
@@ -204,7 +213,7 @@ function MonthGridEventBar({
 
   return (
     <div
-      className={`event-bar ${compact ? 'event-bar-compact' : ''} ${event.readOnly ? 'is-readonly' : ''}`}
+      className={`event-bar ${compact ? 'event-bar-compact' : ''} ${flat ? 'event-bar-flat' : ''} ${event.readOnly ? 'is-readonly' : ''}`}
       style={
         {
           ...eventBarStyle(event),

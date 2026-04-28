@@ -884,6 +884,7 @@ export default function App() {
                   onStartInteraction={handleStartInteraction}
                   onCommitInteraction={() => void handleCommitInteraction()}
                   getPreviewDraft={getPreviewDraft}
+                  onVisibleMonthChange={setMonthIndex}
                 />
               )
             ) : !isDemoMode && accessToken && calendars.length === 0 && loadingCalendars ? (

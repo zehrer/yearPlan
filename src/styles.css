@@ -614,6 +614,18 @@ button {
   min-width: 0;
 }
 
+.month-scroll-view {
+  display: grid;
+  gap: 30px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.month-scroll-item {
+  scroll-margin-top: 18px;
+}
+
 .month-card {
   position: relative;
   overflow: hidden;
@@ -640,6 +652,22 @@ button {
   font-size: 1.35rem;
 }
 
+.month-card-flat {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.month-card-flat .month-card-header {
+  padding: 0 0 12px;
+}
+
+.month-card-flat .month-card-header h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
 .month-weekday-row {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
@@ -650,10 +678,27 @@ button {
   text-align: center;
 }
 
+.month-weekday-row-flat {
+  gap: 0;
+  padding: 0 0 8px;
+  border-bottom: 1px solid rgba(36, 41, 58, 0.1);
+  font-size: 0.94rem;
+}
+
+.month-weekday-row-flat span {
+  padding: 0 12px;
+  text-align: left;
+}
+
 .month-weeks {
   display: grid;
   gap: 10px;
   padding: 0 14px 14px;
+}
+
+.month-weeks-flat {
+  gap: 0;
+  padding: 0;
 }
 
 .week-row {
@@ -668,11 +713,24 @@ button {
   min-height: calc(52px + (var(--week-lanes) * 20px));
 }
 
+.week-row-flat {
+  border-radius: 0;
+  background: transparent;
+  min-height: calc(72px + (var(--week-lanes) * 18px));
+  border: 0;
+  border-bottom: 1px solid rgba(36, 41, 58, 0.1);
+}
+
 .week-days {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 6px;
   padding: 6px;
+}
+
+.week-row-flat .week-days {
+  gap: 0;
+  padding: 0;
 }
 
 .day-cell {
@@ -694,14 +752,40 @@ button {
   padding: 6px;
 }
 
+.day-cell-flat {
+  min-height: 70px;
+  padding: 8px 12px;
+  border-radius: 0;
+  background: transparent;
+  border-right: 1px solid rgba(36, 41, 58, 0.1);
+}
+
+.day-cell-flat:last-child {
+  border-right: 0;
+}
+
+.day-cell-flat:hover {
+  background: rgba(225, 235, 255, 0.54);
+}
+
 .day-cell.is-outside {
   color: rgba(94, 102, 119, 0.58);
   background: rgba(255, 255, 255, 0.52);
 }
 
+.day-cell-flat.is-outside {
+  background: transparent;
+  color: rgba(94, 102, 119, 0.55);
+}
+
 .day-cell.is-selected {
   background: rgba(23, 67, 195, 0.14);
   outline: 2px solid rgba(23, 67, 195, 0.22);
+}
+
+.day-cell-flat.is-selected {
+  outline: 0;
+  background: rgba(23, 67, 195, 0.1);
 }
 
 .day-number {
@@ -716,6 +800,10 @@ button {
 
 .month-card-compact .week-bars {
   inset: 22px 8px 6px;
+}
+
+.week-bars-flat {
+  inset: 30px 0 6px;
 }
 
 .event-bar {
@@ -733,6 +821,13 @@ button {
 
 .event-bar-compact {
   height: 17px;
+}
+
+.event-bar-flat {
+  grid-template-columns: 10px minmax(0, 1fr) 10px;
+  gap: 2px;
+  top: calc((var(--bar-lane) - 1) * 18px);
+  height: 16px;
 }
 
 .event-body,
@@ -759,9 +854,20 @@ button {
   opacity: 0.78;
 }
 
+.event-bar-flat .event-body {
+  border-radius: 4px;
+  padding: 0 8px;
+  box-shadow: none;
+  font-size: 0.72rem;
+}
+
 .event-handle {
   border-radius: 999px;
   background: rgba(31, 36, 51, 0.18);
+}
+
+.event-bar-flat .event-handle {
+  border-radius: 4px;
 }
 
 .event-handle:hover {
