@@ -2,6 +2,7 @@ import type { AppMode, CalendarView, PlannerEvent, PlannerEventType } from '../t
 
 const STORAGE_KEYS = {
   appMode: 'yearplan:app-mode',
+  demoFallback: 'yearplan:demo-fallback',
   selectedCalendarIds: 'yearplan:selected-calendar-ids',
   calendarFilters: 'yearplan:calendar-filters',
   typeFilters: 'yearplan:type-filters',
@@ -78,6 +79,14 @@ export function readAppMode(): AppMode | null {
 
 export function writeAppMode(mode: AppMode): void {
   writeJson(STORAGE_KEYS.appMode, mode);
+}
+
+export function readDemoFallback(): boolean {
+  return readJson<boolean>(STORAGE_KEYS.demoFallback, false);
+}
+
+export function writeDemoFallback(value: boolean): void {
+  writeJson(STORAGE_KEYS.demoFallback, value);
 }
 
 export function readDemoEvents(): PlannerEvent[] {

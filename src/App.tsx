@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarPicker } from './components/CalendarPicker';
 import { EventModal } from './components/EventModal';
 import { MonthView } from './components/MonthView';
-import { PlannerToolbar } from './components/PlannerToolbar';
+import { PlannerFiltersSidebar } from './components/PlannerFiltersSidebar';
+import { StatusConsole } from './components/StatusConsole';
 import { YearView } from './components/YearView';
 import {
   addDays,
@@ -18,6 +19,7 @@ import {
   EVENT_TYPE_OPTIONS,
   fetchCalendarList,
   fetchPlannerEvents,
+  getConfiguredGoogleClientId,
   hasGoogleClientIdConfigured,
   requestGoogleAccessToken,
   updatePlannerEvent,
@@ -27,6 +29,7 @@ import {
   readAppMode,
   readAuthHint,
   readCalendarFilters,
+  readDemoFallback,
   readDemoEvents,
   readMonth,
   readSelectedCalendarIds,
@@ -35,6 +38,7 @@ import {
   writeAppMode,
   writeAuthHint,
   writeCalendarFilters,
+  writeDemoFallback,
   writeDemoEvents,
   writeMonth,
   writeSelectedCalendarIds,
@@ -59,6 +63,14 @@ interface DragInteractionState {
 interface SelectionState {
   startDate: string;
   endDate: string;
+}
+
+interface AppLogEntry {
+  id: number;
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  timestamp: string;
 }
 
 function getDefaultDraft(calendarId: string, startDate: string, endDate: string): PlannerEventDraft {
@@ -96,7 +108,10 @@ export default function App() {
   const initialMonthIndex = getMonthIndex(initialMonth);
   const initialView = readView() ?? 'year';
   const googleConfigured = hasGoogleClientIdConfigured();
-  const initialMode = readAppMode() ?? (googleConfigured ? 'google' : 'demo');
+  const configuredClientId = getConfiguredGoogleClientId();
+  const storedMode = readAppMode();
+  const initialMode = !googleConfigured ? 'demo' : readDemoFallback() ? 'google' : (storedMode ?? 'google');
+  const logIdRef = useRef(0);
 
   const [appMode, setAppMode] = useState<AppMode>(initialMode);
   const [accessToken, setAccessToken] = useState<string | null>(null);
@@ -118,20 +133,35 @@ export default function App() {
   const [modalState, setModalState] = useState<ModalState | null>(null);
   const [savingEvent, setSavingEvent] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const isDemoMode = appMode === 'demo';
   const showSignedOutPreview = !isDemoMode && !accessToken;
+  const clientIdPreview = configuredClientId
+    ? `${configuredClientId.slice(0, 18)}...${configuredClientId.slice(-8)}`
+    : 'missing';
 
   const selectedCalendars = useMemo(
     () => calendars.filter((calendar) => selectedCalendarIds.includes(calendar.id)),
     [calendars, selectedCalendarIds],
   );
 
+  const sidebarCalendars = useMemo(
+    () => (calendars.length > 0 ? calendars : DEMO_CALENDARS),
+    [calendars],
+  );
+
+  const activeCalendarIds = useMemo(
+    () => (selectedCalendarIds.length > 0 ? selectedCalendarIds : sidebarCalendars.map((calendar) => calendar.id)),
+    [selectedCalendarIds, sidebarCalendars],
+  );
+
   const filteredEvents = useMemo(() => {
-    const activeCalendarIds = calendarFilters.length > 0 ? calendarFilters : selectedCalendarIds;
+    const activeFilterCalendarIds = calendarFilters.length > 0 ? calendarFilters : selectedCalendarIds;
     const activeTypes = typeFilters.length > 0 ? typeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value);
 
     return events.filter(
-      (event) => activeCalendarIds.includes(event.calendarId) && activeTypes.includes(event.type),
+      (event) => activeFilterCalendarIds.includes(event.calendarId) && activeTypes.includes(event.type),
     );
   }, [calendarFilters, events, selectedCalendarIds, typeFilters]);
 
@@ -139,6 +169,32 @@ export default function App() {
     () => DEMO_EVENTS.filter((event) => getYear(event.startDate) <= year && getYear(event.endDate) >= year),
     [year],
   );
+
+  const displayEvents = useMemo(() => {
+    if (showSignedOutPreview) {
+      const activeFilterCalendarIds = calendarFilters.length > 0 ? calendarFilters : sidebarCalendars.map((calendar) => calendar.id);
+      const activeTypes = typeFilters.length > 0 ? typeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value);
+      return signedOutPreviewEvents.filter(
+        (event) => activeFilterCalendarIds.includes(event.calendarId) && activeTypes.includes(event.type),
+      );
+    }
+
+    return filteredEvents;
+  }, [calendarFilters, filteredEvents, showSignedOutPreview, sidebarCalendars, signedOutPreviewEvents, typeFilters]);
+
+  const appendLog = useCallback((level: AppLogEntry['level'], source: string, message: string) => {
+    const entry: AppLogEntry = {
+      id: ++logIdRef.current,
+      level,
+      source,
+      message,
+      timestamp: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+    };
+
+    setLogs((current) => [...current.slice(-79), entry]);
+    const logger = level === 'error' ? console.error : level === 'warn' ? console.warn : console.info;
+    logger(`[YearPlan:${source}] ${message}`);
+  }, []);
 
   const previewDrafts = useMemo(() => {
     if (!draggingState) {
@@ -174,9 +230,16 @@ export default function App() {
     return previewDrafts.get(eventId) ?? null;
   }
 
+  function handleSetAppMode(mode: AppMode) {
+    setAppMode(mode);
+    writeDemoFallback(false);
+    appendLog('info', 'Mode', `Switched to ${mode} mode.`);
+  }
+
   async function fetchEventsForCurrentYear(token: string, activeCalendars: GoogleCalendarEntry[]) {
     if (activeCalendars.length === 0) {
       setEvents([]);
+      appendLog('warn', 'Events', 'Skipped year fetch because no calendars are selected.');
       return;
     }
 
@@ -188,6 +251,7 @@ export default function App() {
     try {
       const nextEvents = await fetchPlannerEvents(token, activeCalendars, startDate, endDate);
       setEvents(nextEvents);
+      appendLog('info', 'Events', `Loaded ${nextEvents.length} events for ${year}.`);
     } finally {
       setLoadingEvents(false);
     }
@@ -200,6 +264,7 @@ export default function App() {
     try {
       const nextCalendars = await fetchCalendarList(token);
       setCalendars(nextCalendars);
+      appendLog('info', 'Calendars', `Loaded ${nextCalendars.length} writable calendars from Google.`);
 
       const storedSelection = readSelectedCalendarIds();
       const validSelection = storedSelection.filter((calendarId) => nextCalendars.some((calendar) => calendar.id === calendarId));
@@ -216,6 +281,7 @@ export default function App() {
       writeTypeFilters(storedTypeFilters.length > 0 ? storedTypeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value));
     } catch (error) {
       setAppError(error instanceof Error ? error.message : 'Could not load your Google calendars.');
+      appendLog('error', 'Calendars', error instanceof Error ? error.message : 'Could not load your Google calendars.');
     } finally {
       setLoadingCalendars(false);
     }
@@ -224,13 +290,16 @@ export default function App() {
   async function signIn(prompt: '' | 'consent') {
     setAuthError(null);
     setAppError(null);
+    appendLog('info', 'Auth', `Starting Google sign-in with prompt="${prompt || 'silent'}".`);
 
     try {
       const token = await requestGoogleAccessToken(prompt);
       setAccessToken(token);
       writeAuthHint(true);
+      appendLog('info', 'Auth', 'Google access token received.');
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Sign-in failed.');
+      appendLog('error', 'Auth', error instanceof Error ? error.message : 'Sign-in failed.');
       if (prompt === '') {
         writeAuthHint(false);
       }
@@ -242,6 +311,29 @@ export default function App() {
   useEffect(() => {
     writeAppMode(appMode);
   }, [appMode]);
+
+  useEffect(() => {
+    appendLog(
+      googleConfigured ? 'info' : 'warn',
+      'Boot',
+      `Build config loaded. Google client id is ${googleConfigured ? 'present' : 'missing'} for ${window.location.origin}${window.location.pathname}.`,
+    );
+  }, [appendLog, googleConfigured]);
+
+  useEffect(() => {
+    if (!googleConfigured) {
+      writeDemoFallback(true);
+      appendLog('warn', 'Boot', 'Falling back to demo mode because the Google client id is missing in this build.');
+    }
+  }, [appendLog, googleConfigured]);
+
+  useEffect(() => {
+    if (googleConfigured && readDemoFallback() && appMode === 'demo') {
+      setAppMode('google');
+      writeDemoFallback(false);
+      appendLog('info', 'Boot', 'Detected a configured Google client id and cleared a stale demo fallback state.');
+    }
+  }, [appMode, appendLog, googleConfigured]);
 
   useEffect(() => {
     if (isDemoMode) {
@@ -259,21 +351,25 @@ export default function App() {
       setAuthAttempted(true);
       setAuthError(null);
       setAppError(null);
+      appendLog('info', 'Demo', `Demo mode active with ${DEMO_CALENDARS.length} calendars and ${nextEvents.length} events.`);
     }
-  }, [isDemoMode]);
+  }, [appendLog, isDemoMode]);
 
   useEffect(() => {
     if (isDemoMode || !googleConfigured) {
       setAuthAttempted(true);
+      appendLog('info', 'Auth', isDemoMode ? 'Skipping Google auto sign-in because demo mode is active.' : 'Skipping Google auto sign-in because the client id is missing.');
       return;
     }
 
     if (readAuthHint()) {
+      appendLog('info', 'Auth', 'Attempting silent Google sign-in based on stored auth hint.');
       void signIn('');
       return;
     }
+    appendLog('info', 'Auth', 'Google configured. Waiting for explicit sign-in.');
     setAuthAttempted(true);
-  }, [googleConfigured, isDemoMode]);
+  }, [appendLog, googleConfigured, isDemoMode]);
 
   useEffect(() => {
     if (isDemoMode || !accessToken) {
@@ -323,9 +419,10 @@ export default function App() {
 
     void fetchEventsForCurrentYear(accessToken, selectedCalendars).catch((error: unknown) => {
       setAppError(error instanceof Error ? error.message : 'Could not load planner events.');
+      appendLog('error', 'Events', error instanceof Error ? error.message : 'Could not load planner events.');
       setLoadingEvents(false);
     });
-  }, [accessToken, isDemoMode, selectedCalendars, year]);
+  }, [accessToken, appendLog, isDemoMode, selectedCalendars, year]);
 
   useEffect(() => {
     if (isDemoMode) {
@@ -416,12 +513,15 @@ export default function App() {
     try {
       if (isDemoMode) {
         setEvents((current) => current.map((event) => (event.id === draft.id ? { ...event, ...draft } : event)));
+        appendLog('info', 'Edit', `Updated demo event ${draft.id}.`);
       } else if (accessToken) {
         const updated = await updatePlannerEvent(accessToken, draft, calendars);
         setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+        appendLog('info', 'Edit', `Updated Google event ${updated.id}.`);
       }
     } catch (error) {
       setAppError(error instanceof Error ? error.message : 'Could not update the event.');
+      appendLog('error', 'Edit', error instanceof Error ? error.message : 'Could not update the event.');
     } finally {
       setSavingEvent(false);
     }
@@ -454,9 +554,11 @@ export default function App() {
             readOnly: false,
           };
           setEvents((current) => [...current, created]);
+          appendLog('info', 'Create', `Created demo event "${created.title}".`);
         } else if (accessToken) {
           const created = await createPlannerEvent(accessToken, draft, calendars);
           setEvents((current) => [...current, created]);
+          appendLog('info', 'Create', `Created Google event "${created.title}".`);
         }
       } else {
         if (isDemoMode) {
@@ -474,14 +576,17 @@ export default function App() {
                 : event,
             ),
           );
+          appendLog('info', 'Edit', `Saved demo event "${draft.title}".`);
         } else if (accessToken) {
           const updated = await updatePlannerEvent(accessToken, draft, calendars);
           setEvents((current) => current.map((event) => (event.id === updated.id ? updated : event)));
+          appendLog('info', 'Edit', `Saved Google event "${updated.title}".`);
         }
       }
       setModalState(null);
     } catch (error) {
       setAppError(error instanceof Error ? error.message : 'Could not save the event.');
+      appendLog('error', 'Save', error instanceof Error ? error.message : 'Could not save the event.');
     } finally {
       setSavingEvent(false);
     }
@@ -503,8 +608,10 @@ export default function App() {
         event: adopted,
         draft: createDraftFromEvent(adopted),
       });
+      appendLog('info', 'Adopt', `Adopted Google event "${adopted.title}" into YearPlan metadata.`);
     } catch (error) {
       setAppError(error instanceof Error ? error.message : 'Could not adopt the event.');
+      appendLog('error', 'Adopt', error instanceof Error ? error.message : 'Could not adopt the event.');
     } finally {
       setSavingEvent(false);
     }
@@ -514,47 +621,102 @@ export default function App() {
     if (isDemoMode) {
       const storedDemoEvents = readDemoEvents();
       setEvents(storedDemoEvents.length > 0 ? storedDemoEvents : DEMO_EVENTS);
+      appendLog('info', 'Refresh', 'Reloaded demo events from local storage.');
       return;
     }
 
     if (!accessToken) {
+      appendLog('warn', 'Refresh', 'Refresh requested without a Google access token.');
       return;
     }
 
     setAppError(null);
     void fetchEventsForCurrentYear(accessToken, selectedCalendars).catch((error: unknown) => {
       setAppError(error instanceof Error ? error.message : 'Could not refresh planner events.');
+      appendLog('error', 'Refresh', error instanceof Error ? error.message : 'Could not refresh planner events.');
       setLoadingEvents(false);
     });
   }
 
   const emptySelection = selectedCalendarIds.length === 0;
+  const rightSidebarCalendars = sidebarCalendars.filter((calendar) => activeCalendarIds.includes(calendar.id));
 
   return (
     <div className="app-shell">
       <div className="app-background" />
-      <main className="app-content">
-        <section className="hero panel">
-          <div className="hero-copy">
-            <p className="eyebrow">Long-range planning</p>
-            <h1>Plan the year in one view.</h1>
-            <p className="muted">
-              Multi-day trips, vacations, hotel stays, flights, and holidays shown as overlapping bars across the year.
-            </p>
+      <div className="app-topbar">
+        <strong>yearPlan</strong>
+      </div>
+
+      <main className="workspace-shell">
+        <aside className="rail rail-left">
+          <button
+            type="button"
+            className={`rail-nav-button ${view === 'year' ? 'is-active' : ''}`}
+            onClick={() => setView('year')}
+          >
+            Year view
+          </button>
+          <button
+            type="button"
+            className={`rail-nav-button ${view === 'month' ? 'is-active' : ''}`}
+            onClick={() => setView('month')}
+          >
+            Month view
+          </button>
+
+          <div className="rail-card rail-card-compact">
+            <div className="rail-card-header">
+              <strong>Timeline</strong>
+            </div>
+            <div className="rail-year-switcher">
+              <button type="button" className="rail-nav-button" onClick={() => setYear((current) => current - 1)}>
+                Previous
+              </button>
+              <strong>{year}</strong>
+              <button type="button" className="rail-nav-button" onClick={() => setYear((current) => current + 1)}>
+                Next
+              </button>
+            </div>
+            {view === 'month' ? (
+              <select
+                className="input rail-month-select"
+                value={monthIndex}
+                onChange={(event) => setMonthIndex(Number(event.target.value))}
+              >
+                {Array.from({ length: 12 }, (_, index) => (
+                  <option key={index} value={index}>
+                    {new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(
+                      new Date(Date.UTC(year, index, 1)),
+                    )}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <button
+              type="button"
+              className="button button-ghost rail-action"
+              onClick={() => void handleRefresh()}
+              disabled={loadingEvents || loadingCalendars}
+            >
+              {loadingEvents || loadingCalendars ? 'Refreshing…' : 'Refresh'}
+            </button>
           </div>
 
-          {!accessToken && !isDemoMode ? (
-            <div className="auth-card">
-              <h2>{googleConfigured ? 'Connect Google Calendar' : 'Finish setup or start in demo mode'}</h2>
-              <p className="muted">
-                {googleConfigured
-                  ? 'Sign in to load your calendars and switch from preview to live planning.'
-                  : 'Google Calendar is not configured yet. Add a client id for live data, or open the planner in demo mode right now.'}
-              </p>
-              <div className="setup-actions">
+          <div className="rail-card">
+            <div className="rail-card-header">
+              <strong>{isDemoMode ? 'Demo mode' : accessToken ? 'Google Calendar' : 'Preview mode'}</strong>
+            </div>
+            {!accessToken && !isDemoMode ? (
+              <div className="rail-stack">
+                <p className="muted rail-copy">
+                  {googleConfigured
+                    ? 'Preview is visible already. Sign in to switch to your real calendars.'
+                    : 'Google Calendar is not configured in this build yet.'}
+                </p>
                 <button
                   type="button"
-                  className="button button-primary"
+                  className="button button-primary rail-action"
                   onClick={() => void signIn('consent')}
                   disabled={!googleConfigured}
                 >
@@ -562,128 +724,109 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  className="button button-ghost"
-                  onClick={() => setAppMode('demo')}
+                  className="button button-ghost rail-action"
+                  onClick={() => handleSetAppMode('demo')}
                 >
                   Try demo mode
                 </button>
+                {!googleConfigured ? (
+                  <div className="setup-panel rail-inline-panel">
+                    <strong>Setup</strong>
+                    <ol className="setup-list">
+                      <li>Add `VITE_GOOGLE_CLIENT_ID` to the build.</li>
+                      <li>Re-run the Pages deployment.</li>
+                      <li>Authorize `https://zehrer.github.io` in Google Cloud.</li>
+                    </ol>
+                  </div>
+                ) : null}
+                {authAttempted && authError ? <p className="error-text">{authError}</p> : null}
               </div>
-              {!googleConfigured ? (
-                <div className="setup-panel">
-                  <strong>Google setup</strong>
-                  <ol className="setup-list">
-                    <li>Create a `.env.local` file in the project root.</li>
-                    <li>Add `VITE_GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com`.</li>
-                    <li>Restart the dev server and authorize `http://127.0.0.1:5173` in Google Cloud.</li>
-                  </ol>
-                </div>
-              ) : null}
-              {authAttempted && authError ? <p className="error-text">{authError}</p> : null}
-            </div>
-          ) : (
-            <div className="status-card">
-              <strong>{isDemoMode ? 'Demo mode is active' : 'Connected to Google Calendar'}</strong>
-              <span>
-                {isDemoMode
-                  ? 'You can test year view, month view, filters, and drag editing locally without Google.'
-                  : 'Browser-only OAuth. Events stay in your selected calendars.'}
-              </span>
-              <div className="setup-actions">
+            ) : (
+              <div className="rail-stack">
+                <p className="muted rail-copy">
+                  {isDemoMode
+                    ? 'Local sample data for testing interactions.'
+                    : 'Connected to selected Google calendars.'}
+                </p>
                 {isDemoMode && googleConfigured ? (
-                  <button type="button" className="button button-primary" onClick={() => setAppMode('google')}>
+                  <button type="button" className="button button-primary rail-action" onClick={() => handleSetAppMode('google')}>
                     Switch to Google
                   </button>
                 ) : null}
                 {!isDemoMode ? (
-                  <button type="button" className="button button-ghost" onClick={() => setAppMode('demo')}>
+                  <button type="button" className="button button-ghost rail-action" onClick={() => handleSetAppMode('demo')}>
                     Open demo mode
                   </button>
                 ) : null}
               </div>
+            )}
+          </div>
+        </aside>
+
+        <section className="workspace-main">
+          <header className="workspace-header panel">
+            <div>
+              <p className="eyebrow">{showSignedOutPreview ? 'Preview' : isDemoMode ? 'Demo' : 'Planner'}</p>
+              <h1>{view === 'year' ? `${year} at a glance` : `${new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(Date.UTC(year, monthIndex, 1)))}`}</h1>
             </div>
-          )}
+            <p className="muted">
+              {showSignedOutPreview
+                ? 'Read-only sample year view before login.'
+                : 'Long-range planning focused on multi-day blocks.'}
+            </p>
+          </header>
+
+          {appError ? <div className="panel error-banner">{appError}</div> : null}
+
+          {(isDemoMode || accessToken) && calendars.length > 0 && (showCalendarPicker || emptySelection) ? (
+            <CalendarPicker
+              calendars={calendars}
+              selectedCalendarIds={selectedCalendarIds}
+              onToggleCalendar={handleToggleCalendar}
+              onContinue={() => setShowCalendarPicker(false)}
+            />
+          ) : null}
+
+          <section className="workspace-canvas panel">
+            {showSignedOutPreview ? (
+              <YearView year={year} events={displayEvents} onOpenEvent={() => undefined} />
+            ) : (isDemoMode || accessToken) && calendars.length > 0 && !emptySelection && !showCalendarPicker ? (
+              view === 'year' ? (
+                <YearView year={year} events={displayEvents} onOpenEvent={handleOpenEvent} getPreviewDraft={getPreviewDraft} />
+              ) : (
+                <MonthView
+                  year={year}
+                  monthIndex={monthIndex}
+                  events={displayEvents}
+                  draggingState={draggingState}
+                  selection={selection}
+                  onOpenEvent={handleOpenEvent}
+                  onStartSelection={handleStartSelection}
+                  onHoverDate={handleHoverDate}
+                  onCommitSelection={handleCommitSelection}
+                  onStartInteraction={handleStartInteraction}
+                  onCommitInteraction={() => void handleCommitInteraction()}
+                  getPreviewDraft={getPreviewDraft}
+                />
+              )
+            ) : !isDemoMode && accessToken && calendars.length === 0 && loadingCalendars ? (
+              <div className="centered-state">Loading calendars…</div>
+            ) : !isDemoMode && accessToken && calendars.length === 0 && !loadingCalendars ? (
+              <div className="centered-state">No writable Google Calendars were found for this account.</div>
+            ) : (
+              <div className="centered-state">Select a calendar source to start planning.</div>
+            )}
+          </section>
         </section>
 
-        {appError ? <div className="panel error-banner">{appError}</div> : null}
-
-        {showSignedOutPreview ? (
-          <section className="panel preview-panel">
-            <div className="preview-header">
-              <div>
-                <p className="eyebrow">Preview</p>
-                <h2>{year} year view</h2>
-              </div>
-              <p className="muted">
-                Read-only sample data. Sign in or open demo mode for editing.
-              </p>
-            </div>
-            <YearView
-              year={year}
-              events={signedOutPreviewEvents}
-              onOpenEvent={() => undefined}
-            />
-          </section>
-        ) : null}
-
-        {(isDemoMode || accessToken) && calendars.length > 0 && (showCalendarPicker || emptySelection) ? (
-          <CalendarPicker
-            calendars={calendars}
-            selectedCalendarIds={selectedCalendarIds}
-            onToggleCalendar={handleToggleCalendar}
-            onContinue={() => setShowCalendarPicker(false)}
-          />
-        ) : null}
-
-        {(isDemoMode || accessToken) && calendars.length > 0 && !emptySelection && !showCalendarPicker ? (
-          <>
-            <PlannerToolbar
-              calendars={calendars}
-              calendarFilters={calendarFilters}
-              monthIndex={monthIndex}
-              selectedCalendarIds={selectedCalendarIds}
-              typeFilters={typeFilters}
-              view={view}
-              year={year}
-              onSetView={setView}
-              onSetMonth={setMonthIndex}
-              onShiftYear={(delta) => setYear((current) => current + delta)}
-              onToggleCalendarFilter={handleToggleCalendarFilter}
-              onToggleTypeFilter={handleToggleTypeFilter}
-              onRefresh={() => void handleRefresh()}
-              onManageCalendars={() => setShowCalendarPicker(true)}
-              loading={loadingEvents || loadingCalendars}
-            />
-
-            {view === 'year' ? (
-              <YearView year={year} events={filteredEvents} onOpenEvent={handleOpenEvent} getPreviewDraft={getPreviewDraft} />
-            ) : (
-              <MonthView
-                year={year}
-                monthIndex={monthIndex}
-                events={filteredEvents}
-                draggingState={draggingState}
-                selection={selection}
-                onOpenEvent={handleOpenEvent}
-                onStartSelection={handleStartSelection}
-                onHoverDate={handleHoverDate}
-                onCommitSelection={handleCommitSelection}
-                onStartInteraction={handleStartInteraction}
-                onCommitInteraction={() => void handleCommitInteraction()}
-                getPreviewDraft={getPreviewDraft}
-              />
-            )}
-          </>
-        ) : null}
-
-        {!isDemoMode && accessToken && calendars.length === 0 && loadingCalendars ? (
-          <div className="panel centered-state">Loading calendars…</div>
-        ) : null}
-
-        {!isDemoMode && accessToken && calendars.length === 0 && !loadingCalendars ? (
-          <div className="panel centered-state">
-            No writable Google Calendars were found for this account.
-          </div>
-        ) : null}
+        <PlannerFiltersSidebar
+          calendars={rightSidebarCalendars}
+          calendarFilters={calendarFilters.length > 0 ? calendarFilters : activeCalendarIds}
+          onManageCalendars={() => setShowCalendarPicker(true)}
+          onToggleCalendarFilter={handleToggleCalendarFilter}
+          onToggleTypeFilter={handleToggleTypeFilter}
+          typeFilters={typeFilters.length > 0 ? typeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value)}
+        />
       </main>
 
       <EventModal
@@ -695,6 +838,20 @@ export default function App() {
         onClose={() => setModalState(null)}
         onSave={(draft) => void handleSaveDraft(draft)}
         onAdopt={(event) => void handleAdoptEvent(event)}
+      />
+
+      <StatusConsole
+        accessTokenPresent={Boolean(accessToken)}
+        calendarsCount={calendars.length}
+        clientIdPreview={clientIdPreview}
+        eventsCount={events.length}
+        googleConfigured={googleConfigured}
+        isOpen={diagnosticsOpen}
+        lastError={appError ?? authError}
+        logs={logs}
+        modeLabel={isDemoMode ? 'Demo mode' : accessToken ? 'Google connected' : 'Google preview'}
+        onToggle={() => setDiagnosticsOpen((current) => !current)}
+        origin={window.location.origin}
       />
     </div>
   );
