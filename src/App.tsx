@@ -73,6 +73,25 @@ interface AppLogEntry {
   timestamp: string;
 }
 
+function isLikelyEmail(value: string): boolean {
+  return value.includes('@');
+}
+
+function toDisplayName(value: string): string {
+  return value
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function getCalendarDisplayName(calendar: GoogleCalendarEntry): string {
+  if (calendar.primary && isLikelyEmail(calendar.summary)) {
+    return 'My calendar';
+  }
+  return calendar.summary;
+}
+
 function getDefaultDraft(calendarId: string, startDate: string, endDate: string): PlannerEventDraft {
   const vacation = EVENT_TYPE_OPTIONS.find((option) => option.value === 'vacation')!;
   return {
@@ -112,10 +131,10 @@ export default function App() {
   const storedMode = readAppMode();
   const initialMode = !googleConfigured ? 'demo' : readDemoFallback() ? 'google' : (storedMode ?? 'google');
   const logIdRef = useRef(0);
+  const bootLogKeysRef = useRef<Set<string>>(new Set());
 
   const [appMode, setAppMode] = useState<AppMode>(initialMode);
   const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [authAttempted, setAuthAttempted] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [calendars, setCalendars] = useState<GoogleCalendarEntry[]>([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>(readSelectedCalendarIds());
@@ -135,16 +154,35 @@ export default function App() {
   const [appError, setAppError] = useState<string | null>(null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
+  const [leftRailCollapsed, setLeftRailCollapsed] = useState(false);
+  const [rightRailCollapsed, setRightRailCollapsed] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const isDemoMode = appMode === 'demo';
   const showSignedOutPreview = !isDemoMode && !accessToken;
   const clientIdPreview = configuredClientId
     ? `${configuredClientId.slice(0, 18)}...${configuredClientId.slice(-8)}`
     : 'missing';
+  const currentTitle = view === 'year'
+    ? String(year)
+    : new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(Date.UTC(year, monthIndex, 1)));
 
   const selectedCalendars = useMemo(
     () => calendars.filter((calendar) => selectedCalendarIds.includes(calendar.id)),
     [calendars, selectedCalendarIds],
   );
+  const primaryCalendar = useMemo(
+    () => selectedCalendars.find((calendar) => calendar.primary) ?? calendars.find((calendar) => calendar.primary) ?? null,
+    [calendars, selectedCalendars],
+  );
+  const topbarUserLabel = accessToken
+    ? primaryCalendar
+      ? isLikelyEmail(primaryCalendar.summary)
+        ? toDisplayName(primaryCalendar.summary.split('@')[0] ?? 'Google user')
+        : primaryCalendar.summary
+      : 'Google user'
+    : isDemoMode
+      ? 'Demo user'
+      : 'Guest';
 
   const sidebarCalendars = useMemo(
     () => (calendars.length > 0 ? calendars : DEMO_CALENDARS),
@@ -196,6 +234,15 @@ export default function App() {
     logger(`[YearPlan:${source}] ${message}`);
   }, []);
 
+  const appendBootLogOnce = useCallback((level: AppLogEntry['level'], source: string, message: string) => {
+    const key = `${source}:${message}`;
+    if (bootLogKeysRef.current.has(key)) {
+      return;
+    }
+    bootLogKeysRef.current.add(key);
+    appendLog(level, source, message);
+  }, [appendLog]);
+
   const previewDrafts = useMemo(() => {
     if (!draggingState) {
       return new Map<string, PlannerEventDraft>();
@@ -234,6 +281,46 @@ export default function App() {
     setAppMode(mode);
     writeDemoFallback(false);
     appendLog('info', 'Mode', `Switched to ${mode} mode.`);
+  }
+
+  function handleNavigatePrevious() {
+    if (view === 'year') {
+      setYear((current) => current - 1);
+      return;
+    }
+
+    setMonthIndex((current) => {
+      if (current === 0) {
+        setYear((yearCurrent) => yearCurrent - 1);
+        return 11;
+      }
+      return current - 1;
+    });
+  }
+
+  function handleNavigateNext() {
+    if (view === 'year') {
+      setYear((current) => current + 1);
+      return;
+    }
+
+    setMonthIndex((current) => {
+      if (current === 11) {
+        setYear((yearCurrent) => yearCurrent + 1);
+        return 0;
+      }
+      return current + 1;
+    });
+  }
+
+  function handleDisconnectGoogle() {
+    setAccessToken(null);
+    setCalendars([]);
+    setSelectedCalendarIds([]);
+    setCalendarFilters([]);
+    writeAuthHint(false);
+    setUserMenuOpen(false);
+    appendLog('info', 'Auth', 'Disconnected Google session and returned to preview mode.');
   }
 
   async function fetchEventsForCurrentYear(token: string, activeCalendars: GoogleCalendarEntry[]) {
@@ -304,7 +391,6 @@ export default function App() {
         writeAuthHint(false);
       }
     } finally {
-      setAuthAttempted(true);
     }
   }
 
@@ -313,27 +399,27 @@ export default function App() {
   }, [appMode]);
 
   useEffect(() => {
-    appendLog(
+    appendBootLogOnce(
       googleConfigured ? 'info' : 'warn',
       'Boot',
       `Build config loaded. Google client id is ${googleConfigured ? 'present' : 'missing'} for ${window.location.origin}${window.location.pathname}.`,
     );
-  }, [appendLog, googleConfigured]);
+  }, [appendBootLogOnce, googleConfigured]);
 
   useEffect(() => {
     if (!googleConfigured) {
       writeDemoFallback(true);
-      appendLog('warn', 'Boot', 'Falling back to demo mode because the Google client id is missing in this build.');
+      appendBootLogOnce('warn', 'Boot', 'Falling back to demo mode because the Google client id is missing in this build.');
     }
-  }, [appendLog, googleConfigured]);
+  }, [appendBootLogOnce, googleConfigured]);
 
   useEffect(() => {
     if (googleConfigured && readDemoFallback() && appMode === 'demo') {
       setAppMode('google');
       writeDemoFallback(false);
-      appendLog('info', 'Boot', 'Detected a configured Google client id and cleared a stale demo fallback state.');
+      appendBootLogOnce('info', 'Boot', 'Detected a configured Google client id and cleared a stale demo fallback state.');
     }
-  }, [appMode, appendLog, googleConfigured]);
+  }, [appMode, appendBootLogOnce, googleConfigured]);
 
   useEffect(() => {
     if (isDemoMode) {
@@ -348,7 +434,6 @@ export default function App() {
       setShowCalendarPicker(false);
       setEvents(nextEvents);
       writeDemoEvents(nextEvents);
-      setAuthAttempted(true);
       setAuthError(null);
       setAppError(null);
       appendLog('info', 'Demo', `Demo mode active with ${DEMO_CALENDARS.length} calendars and ${nextEvents.length} events.`);
@@ -357,19 +442,17 @@ export default function App() {
 
   useEffect(() => {
     if (isDemoMode || !googleConfigured) {
-      setAuthAttempted(true);
-      appendLog('info', 'Auth', isDemoMode ? 'Skipping Google auto sign-in because demo mode is active.' : 'Skipping Google auto sign-in because the client id is missing.');
+      appendBootLogOnce('info', 'Auth', isDemoMode ? 'Skipping Google auto sign-in because demo mode is active.' : 'Skipping Google auto sign-in because the client id is missing.');
       return;
     }
 
     if (readAuthHint()) {
-      appendLog('info', 'Auth', 'Attempting silent Google sign-in based on stored auth hint.');
+      appendBootLogOnce('info', 'Auth', 'Attempting silent Google sign-in based on stored auth hint.');
       void signIn('');
       return;
     }
-    appendLog('info', 'Auth', 'Google configured. Waiting for explicit sign-in.');
-    setAuthAttempted(true);
-  }, [appendLog, googleConfigured, isDemoMode]);
+    appendBootLogOnce('info', 'Auth', 'Google configured. Waiting for explicit sign-in.');
+  }, [appendBootLogOnce, googleConfigured, isDemoMode]);
 
   useEffect(() => {
     if (isDemoMode || !accessToken) {
@@ -645,137 +728,131 @@ export default function App() {
     <div className="app-shell">
       <div className="app-background" />
       <div className="app-topbar">
-        <strong>yearPlan</strong>
-      </div>
-
-      <main className="workspace-shell">
-        <aside className="rail rail-left">
+        <div className="app-topbar-left">
           <button
             type="button"
-            className={`rail-nav-button ${view === 'year' ? 'is-active' : ''}`}
-            onClick={() => setView('year')}
+            className="topbar-icon-button"
+            onClick={() => setLeftRailCollapsed((current) => !current)}
+            aria-label="Toggle navigation"
           >
-            Year view
+            ≡
           </button>
-          <button
-            type="button"
-            className={`rail-nav-button ${view === 'month' ? 'is-active' : ''}`}
-            onClick={() => setView('month')}
-          >
-            Month view
-          </button>
-
-          <div className="rail-card rail-card-compact">
-            <div className="rail-card-header">
-              <strong>Timeline</strong>
-            </div>
-            <div className="rail-year-switcher">
-              <button type="button" className="rail-nav-button" onClick={() => setYear((current) => current - 1)}>
-                Previous
-              </button>
-              <strong>{year}</strong>
-              <button type="button" className="rail-nav-button" onClick={() => setYear((current) => current + 1)}>
-                Next
-              </button>
-            </div>
-            {view === 'month' ? (
-              <select
-                className="input rail-month-select"
-                value={monthIndex}
-                onChange={(event) => setMonthIndex(Number(event.target.value))}
-              >
-                {Array.from({ length: 12 }, (_, index) => (
-                  <option key={index} value={index}>
-                    {new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(
-                      new Date(Date.UTC(year, index, 1)),
-                    )}
-                  </option>
-                ))}
-              </select>
-            ) : null}
+          <strong>yearPlan</strong>
+          <div className="topbar-range">
+            <button type="button" className="topbar-pill-button" onClick={handleNavigatePrevious}>
+              ‹
+            </button>
+            <button type="button" className="topbar-pill-button" onClick={handleNavigateNext}>
+              ›
+            </button>
+            <strong className="topbar-period">{currentTitle}</strong>
+          </div>
+        </div>
+        <div className="app-topbar-actions">
+          <div className="topbar-segmented">
             <button
               type="button"
-              className="button button-ghost rail-action"
-              onClick={() => void handleRefresh()}
-              disabled={loadingEvents || loadingCalendars}
+              className={view === 'year' ? 'is-active' : ''}
+              onClick={() => setView('year')}
             >
-              {loadingEvents || loadingCalendars ? 'Refreshing…' : 'Refresh'}
+              Year
+            </button>
+            <button
+              type="button"
+              className={view === 'month' ? 'is-active' : ''}
+              onClick={() => setView('month')}
+            >
+              Month
             </button>
           </div>
+          <button
+            type="button"
+            className="topbar-icon-button"
+            onClick={() => void handleRefresh()}
+            aria-label="Refresh calendars"
+            disabled={loadingEvents || loadingCalendars}
+          >
+            ↻
+          </button>
+          {!accessToken && !isDemoMode && googleConfigured ? (
+            <button type="button" className="button button-primary app-topbar-button" onClick={() => void signIn('consent')}>
+              Connect Google
+            </button>
+          ) : null}
+          {isDemoMode && googleConfigured && !accessToken ? (
+            <button type="button" className="button button-ghost app-topbar-button" onClick={() => handleSetAppMode('google')}>
+              Switch to Google
+            </button>
+          ) : null}
+          {!accessToken && !isDemoMode ? (
+            <button type="button" className="button button-ghost app-topbar-button" onClick={() => handleSetAppMode('demo')}>
+              Demo
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="topbar-icon-button"
+            onClick={() => setRightRailCollapsed((current) => !current)}
+            aria-label="Toggle filters"
+          >
+            ⋮
+          </button>
+          <button type="button" className="topbar-user-badge" onClick={() => setUserMenuOpen((current) => !current)}>
+            <span className="topbar-user-avatar">{topbarUserLabel.slice(0, 1)}</span>
+            <span>{topbarUserLabel}</span>
+          </button>
+          {userMenuOpen ? (
+            <div className="topbar-user-menu">
+              <strong>{topbarUserLabel}</strong>
+              <span>{accessToken ? 'Connected to Google Calendar' : isDemoMode ? 'Demo mode active' : 'Preview mode'}</span>
+              {accessToken ? (
+                <button type="button" className="rail-link" onClick={handleDisconnectGoogle}>
+                  Disconnect Google
+                </button>
+              ) : googleConfigured ? (
+                <button type="button" className="rail-link" onClick={() => void signIn('consent')}>
+                  Connect Google
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
 
+      <main className={`workspace-shell ${leftRailCollapsed ? 'is-left-collapsed' : ''} ${rightRailCollapsed ? 'is-right-collapsed' : ''}`}>
+        <aside className={`rail rail-left ${leftRailCollapsed ? 'is-collapsed' : ''}`}>
           <div className="rail-card">
             <div className="rail-card-header">
-              <strong>{isDemoMode ? 'Demo mode' : accessToken ? 'Google Calendar' : 'Preview mode'}</strong>
+              <strong>My calendars</strong>
+              <button type="button" className="rail-link" onClick={() => setShowCalendarPicker(true)}>
+                Manage
+              </button>
             </div>
-            {!accessToken && !isDemoMode ? (
-              <div className="rail-stack">
-                <p className="muted rail-copy">
-                  {googleConfigured
-                    ? 'Preview is visible already. Sign in to switch to your real calendars.'
-                    : 'Google Calendar is not configured in this build yet.'}
-                </p>
-                <button
-                  type="button"
-                  className="button button-primary rail-action"
-                  onClick={() => void signIn('consent')}
-                  disabled={!googleConfigured}
-                >
-                  Sign in with Google
-                </button>
-                <button
-                  type="button"
-                  className="button button-ghost rail-action"
-                  onClick={() => handleSetAppMode('demo')}
-                >
-                  Try demo mode
-                </button>
-                {!googleConfigured ? (
-                  <div className="setup-panel rail-inline-panel">
-                    <strong>Setup</strong>
-                    <ol className="setup-list">
-                      <li>Add `VITE_GOOGLE_CLIENT_ID` to the build.</li>
-                      <li>Re-run the Pages deployment.</li>
-                      <li>Authorize `https://zehrer.github.io` in Google Cloud.</li>
-                    </ol>
-                  </div>
-                ) : null}
-                {authAttempted && authError ? <p className="error-text">{authError}</p> : null}
-              </div>
-            ) : (
-              <div className="rail-stack">
-                <p className="muted rail-copy">
-                  {isDemoMode
-                    ? 'Local sample data for testing interactions.'
-                    : 'Connected to selected Google calendars.'}
-                </p>
-                {isDemoMode && googleConfigured ? (
-                  <button type="button" className="button button-primary rail-action" onClick={() => handleSetAppMode('google')}>
-                    Switch to Google
+            <div className="rail-stack">
+              {rightSidebarCalendars.map((calendar) => {
+                const enabled = (calendarFilters.length > 0 ? calendarFilters : activeCalendarIds).includes(calendar.id);
+                return (
+                  <button
+                    key={calendar.id}
+                    type="button"
+                    className={`rail-item ${enabled ? 'is-active' : ''}`}
+                    onClick={() => handleToggleCalendarFilter(calendar.id)}
+                  >
+                    <span className="rail-item-square" style={{ borderColor: calendar.backgroundColor ?? '#3f74f6' }}>
+                      {enabled ? '✓' : ''}
+                    </span>
+                    <span className="rail-item-copy">
+                      <strong>{getCalendarDisplayName(calendar)}</strong>
+                      <span>{calendar.primary ? 'Primary' : 'Calendar'}</span>
+                    </span>
                   </button>
-                ) : null}
-                {!isDemoMode ? (
-                  <button type="button" className="button button-ghost rail-action" onClick={() => handleSetAppMode('demo')}>
-                    Open demo mode
-                  </button>
-                ) : null}
-              </div>
-            )}
+                );
+              })}
+            </div>
           </div>
         </aside>
 
         <section className="workspace-main">
-          <header className="workspace-header panel">
-            <div>
-              <p className="eyebrow">{showSignedOutPreview ? 'Preview' : isDemoMode ? 'Demo' : 'Planner'}</p>
-              <h1>{view === 'year' ? `${year} at a glance` : `${new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(Date.UTC(year, monthIndex, 1)))}`}</h1>
-            </div>
-            <p className="muted">
-              {showSignedOutPreview
-                ? 'Read-only sample year view before login.'
-                : 'Long-range planning focused on multi-day blocks.'}
-            </p>
-          </header>
-
           {appError ? <div className="panel error-banner">{appError}</div> : null}
 
           {(isDemoMode || accessToken) && calendars.length > 0 && (showCalendarPicker || emptySelection) ? (
@@ -819,14 +896,12 @@ export default function App() {
           </section>
         </section>
 
-        <PlannerFiltersSidebar
-          calendars={rightSidebarCalendars}
-          calendarFilters={calendarFilters.length > 0 ? calendarFilters : activeCalendarIds}
-          onManageCalendars={() => setShowCalendarPicker(true)}
-          onToggleCalendarFilter={handleToggleCalendarFilter}
-          onToggleTypeFilter={handleToggleTypeFilter}
-          typeFilters={typeFilters.length > 0 ? typeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value)}
-        />
+        {!rightRailCollapsed ? (
+          <PlannerFiltersSidebar
+            onToggleTypeFilter={handleToggleTypeFilter}
+            typeFilters={typeFilters.length > 0 ? typeFilters : EVENT_TYPE_OPTIONS.map((option) => option.value)}
+          />
+        ) : null}
       </main>
 
       <EventModal
